@@ -11,10 +11,10 @@ scribble.roughness = 1.5;
 
 function setup() 
 {
-  createCanvas(windowWidth, windowHeight);
+  createCanvas(windowWidth, windowHeight/4);
  
   // Add an initial set of boids into the system
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 10; i++) {
     boids[i] = new Boid(random(width), random(height));
   }
 }
@@ -26,7 +26,7 @@ function draw()
   for (let i = 0; i < boids.length; i++) {
     boids[i].run(boids);
   }
-  text("A Small Creatures Pond", width/2, height/6, width/1.5, height/4);
+  //text("A Small Creatures Pond", width/2, height/6, width/1.5, height/4);
 }
 
 class Node {
@@ -309,5 +309,5 @@ class Boid extends flagellum {
 }
 
 function windowResized() {
-  resizeCanvas(windowWidth,windowHeight);
+  resizeCanvas(windowWidth,windowHeight/4);
 }
