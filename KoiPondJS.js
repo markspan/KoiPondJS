@@ -4,29 +4,29 @@
  * (Rules: Cohesion, Separation, Alignment.)<br>
  * From <a href="http://natureofcode.com">natureofcode.com</a>.
  */
+var canvas;
+
 let boids = [];
 var scribble = new Scribble();    
 scribble.roughness = 1.5;
 
-
 function setup() 
 {
-  createCanvas(windowWidth, windowHeight/4);
- 
+  var cnv = createCanvas(windowWidth, windowHeight/4);
+  cnv.position(0,0);
   // Add an initial set of boids into the system
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 15; i++) {
     boids[i] = new Boid(random(width), random(height));
   }
 }
 
 function draw() 
 {
-  background(0);
+  background(55);
   // Run all the boids
   for (let i = 0; i < boids.length; i++) {
     boids[i].run(boids);
   }
-  //text("A Small Creatures Pond", width/2, height/6, width/1.5, height/4);
 }
 
 class Node {
@@ -40,19 +40,19 @@ class flagellum
 {
   constructor() {
     this.node = [];
-     this.theta = 180;
-    this.fsize  = (height/200) * random(3, 5);
-    this.numNodes = random(1,3) * this.fsize;
+    this.theta = 180;
+    this.fsize  = (width/2000) * random(2, 4);
+    this.numNodes = random(2,6) * this.fsize;
 
     this.count = 0;
     
     this.rot = 0; 
     this.rotspeed  = random(0.03,1.3);
     
-    this.sw=random(1,1); 
+    this.sw=random(1,2); 
     
     this.muscleFreq = random(0.06, 0.17); 
-    this.muscleRange = 16;
+    this.muscleRange = 6;
     this.node[0] = new Node();
     for (let n = 1; n < this.numNodes; n++) {
       this.node[n]= new Node();
@@ -96,8 +96,8 @@ class flagellum
     let x1 = this.node[0].x + sin(angle) * -(1/this.fsize);
     let y1 = this.node[0].y + cos(angle) * -(1/this.fsize);
     rotate(-angle);
-    scribble.scribbleEllipse (x1, y1, 1.83 * this.fsize*(this.numNodes), 1.42 * this.fsize * (this.numNodes));
-    ellipse (x1, y1, 1.8 * this.fsize * (this.numNodes), 1.4 * this.fsize * (this.numNodes));
+    scribble.scribbleEllipse(x1, y1, 1.22 * this.fsize*(this.numNodes), 1.02 * this.fsize * (this.numNodes));
+    ellipse (x1, y1, 1.2 * this.fsize * (this.numNodes), 1.0 * this.fsize * (this.numNodes));
     rotate(angle);
     
     for (let n = 1; n < this.numNodes; n++) {
@@ -109,8 +109,8 @@ class flagellum
         y1 = this.node[n].y + cos(angle) * -(1/this.fsize);
 
         //rotate(this.rot);
-        scribble.scribbleRect  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
-        rect  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
+        scribble.scribbleEllipse  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
+        ellipse  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
         //rotate(-this.rot);
     }
    // endShape();
@@ -132,7 +132,7 @@ class Boid extends flagellum {
     this.r = 2*this.numNodes*this.fsize;
     this.Col = color(random(255),random(255), random(255), 20);
 
-    this.maxspeed = random(2,3);    // Maximum speed
+    this.maxspeed = random(1,2);    // Maximum speed
     this.maxforce = 0.3; // Maximum steering force
   }
 
@@ -155,8 +155,9 @@ class Boid extends flagellum {
     let ali = this.align(boids);    // Alignment
     let coh = this.cohesion(boids); // Cohesion
     // Arbitrarily weight these forces
-    sep.mult(0.1);
-    ali.mult(1);
+       
+    sep.mult(0.01);
+    ali.mult(0.03);
     coh.mult(0.01);
  
     // Add the force vectors to acceleration
@@ -229,7 +230,7 @@ class Boid extends flagellum {
   // Separation
   // Method checks for nearby boids and steers away
   separate(boids) {
-    let desiredseparation = 70.0;
+    let desiredseparation = 40.0;
     let steer = createVector(0, 0);
     let count = 0;
     // For every boid in the system, check if it's too close
@@ -289,7 +290,7 @@ class Boid extends flagellum {
   // Cohesion
   // For the average location (i.e. center) of all nearby boids, calculate steering vector towards that location
   cohesion(boids) {
-    let neighbordist = 40;
+    let neighbordist = 50;
     let sum = createVector(0, 0); // Start with empty vector to accumulate all locations
     let count = 0;
     for (let i = 0; i < boids.length; i++) {
