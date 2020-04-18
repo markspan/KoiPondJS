@@ -8,7 +8,7 @@ var canvas;
 
 let boids = [];
 var scribble = new Scribble();    
-scribble.roughness = 1.5;
+scribble.roughness = 1.2;
 
 function setup() 
 {
@@ -41,7 +41,7 @@ class flagellum
   constructor() {
     this.node = [];
     this.theta = 180;
-    this.fsize  = (width/2000) * random(2, 4);
+    this.fsize  = ((width+height)/2000) * random(2, 4);
     this.numNodes = random(2,6) * this.fsize;
 
     this.count = 0;

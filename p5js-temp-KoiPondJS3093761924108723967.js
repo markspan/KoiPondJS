@@ -8,7 +8,7 @@ var canvas;
 
 let boids = [];
 var scribble = new Scribble();    
-scribble.roughness = 1;
+scribble.roughness = 1.2;
 
 function setup() 
 {
@@ -41,7 +41,7 @@ class flagellum
   constructor() {
     this.node = [];
     this.theta = 180;
-    this.fsize  = (width/2000) * random(2, 4);
+    this.fsize  = ((width+height)/2000) * random(2, 4);
     this.numNodes = random(2,6) * this.fsize;
 
     this.count = 0;
@@ -97,7 +97,7 @@ class flagellum
     let y1 = this.node[0].y + cos(angle) * -(1/this.fsize);
     rotate(-angle);
     scribble.scribbleEllipse(x1, y1, 1.22 * this.fsize*(this.numNodes), 1.02 * this.fsize * (this.numNodes));
-    //ellipse (x1, y1, 1.2 * this.fsize * (this.numNodes), 1.0 * this.fsize * (this.numNodes));
+    ellipse (x1, y1, 1.2 * this.fsize * (this.numNodes), 1.0 * this.fsize * (this.numNodes));
     rotate(angle);
     
     for (let n = 1; n < this.numNodes; n++) {
@@ -110,7 +110,7 @@ class flagellum
 
         //rotate(this.rot);
         scribble.scribbleEllipse  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
-        //ellipse  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
+        ellipse  (x1, y1, 0.5*this.fsize*(this.numNodes-n), 0.5*this.fsize*(this.numNodes-n));
         //rotate(-this.rot);
     }
    // endShape();
@@ -210,20 +210,22 @@ class Boid extends flagellum {
     translate(this.position.x, this.position.y);
     rotate(theta);
     super.display();
-     pop();
+    //rect(0,0,16,16);
+    pop();
+    //noTint();
+
+    // update flagellum body rotation
+    //super.theta = degrees(theta);
+    //super.theta += 180;
   }
   
   // Wraparound
   borders() {
-    //if (this.position.x < -this.r) {this.position.x = width + this.r;}
-    //if (this.position.y < -this.r) {this.position.y = height + this.r;}
-    //if (this.position.x > width + this.r) {this.position.x = -this.r;}
-    //if (this.position.y > height + this.r) {this.position.y = -this.r;}
-    if (this.position.x < -this.r) {this.velocity.mult(-1);}
-    if (this.position.y < -this.r) {this.velocity.mult(-1);}
-    if (this.position.x > width + this.r) {this.velocity.mult(-1);}
-    if (this.position.y > height + this.r) {this.velocity.mult(-1);}
-   }
+    if (this.position.x < -this.r) {this.position.x = width + this.r;}
+    if (this.position.y < -this.r) {this.position.y = height + this.r;}
+    if (this.position.x > width + this.r) {this.position.x = -this.r;}
+    if (this.position.y > height + this.r) {this.position.y = -this.r;}
+  }
 
   // Separation
   // Method checks for nearby boids and steers away
