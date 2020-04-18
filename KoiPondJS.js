@@ -40,7 +40,7 @@ class flagellum
   constructor() {
     this.node = [];
     this.theta = 180;
-    this.fsize  = (1000/(sqrt((width*width)+(height*height)))) * random(2, 4);
+    this.fsize  = (1000/(sqrt((width*width)+((4*height)*(4*height))))) * random(2, 4);
     this.numNodes = random(2,6) * this.fsize;
 
     this.count = 0;
