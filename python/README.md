@@ -48,4 +48,15 @@ Every setting is in the `PondConfig` dataclass at the top of the file, including
 - the wander and flee strengths
 - ripples
 
-`render_scale` (default 0.5) draws the pond at half resolution and lets the GPU stretch it to the screen. This makes each frame about four times cheaper. Set it to 1.0 for full sharpness on a fast device.
+## Speed
+
+Bending 60 fish means drawing 600 rotated skin strips every frame. By default the pond hands this to the phone's GPU through pygame's SDL2 renderer, which also applies each fish's depth shading and fade-in. The pond is then drawn at full screen resolution, and the CPU only runs the simulation.
+
+If your pygame build has no SDL2 renderer, the pond falls back to drawing with the CPU at half resolution (`render_scale`), which SDL stretches to fill the screen.
+
+Two settings in `PondConfig` control this:
+
+- `renderer`: `"auto"` (default), `"gpu"` or `"software"`.
+- `render_scale`: the CPU fallback's drawing resolution, 0.5 by default. Use 1.0 for full sharpness on a fast device.
+
+If it is still slow on your phone, lower `max_koi` or `body_segments`.

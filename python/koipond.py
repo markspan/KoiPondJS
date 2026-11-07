@@ -21,6 +21,14 @@ dark pebble bed until the pond holds ``max_koi`` fish.
 * Depth: fish born earlier are drawn first and darker, so the pond looks
   deep. New fish fade in.
 
+Speed
+-----
+Bending 60 fish means drawing 600 rotated skin strips per frame. By default
+this is done by the GPU through SDL2's renderer (``pygame._sdl2.video``),
+which also applies the depth tint and fade. Where that is unavailable, the
+pond falls back to CPU drawing at reduced resolution. See ``renderer`` and
+``render_scale`` in :class:`PondConfig`.
+
 Skins
 -----
 Every fish gets its own procedurally painted skin, so no two fish look the
@@ -72,10 +80,14 @@ class PondConfig:
     birth_interval_ms: int = 500
     fps: int = 60
     reference_short_side: float = 450.0  # Short side of the original sketch.
-    # Fraction of the native resolution the pond is drawn at. The GPU
-    # stretches it to the screen (pygame SCALED mode), so 0.5 costs a
-    # quarter of the work and still looks sharp on a high-density phone.
-    # Use 1.0 for full resolution on a fast device.
+    # Window size in pixels, or None for full screen.
+    window_size: tuple[int, int] | None = None
+    # "auto" uses the GPU when this pygame supports it, else the CPU.
+    # Force one with "gpu" or "software".
+    renderer: str = "auto"
+    # CPU renderer only: fraction of the native resolution the pond is drawn
+    # at before SDL stretches it to the screen. 0.5 costs a quarter of the
+    # work. The GPU renderer always draws at full resolution.
     render_scale: float = 0.5
     skins_folder: str = "skins"
 
@@ -483,6 +495,254 @@ class SkinLibrary:
         return painter.paint(variety, rng), variety.name
 
 
+
+# ---------------------------------------------------------------------------
+# Drawing back ends
+# ---------------------------------------------------------------------------
+#
+# Bending a fish means drawing every skin strip rotated along its body
+# segment: 60 fish x 10 strips = 600 rotated images per frame. The GPU does
+# this almost for free, the CPU does not. ``GpuCanvas`` therefore draws
+# through SDL2's hardware renderer; ``SoftwareCanvas`` is the fallback for
+# pygame builds without it. Both offer the same small interface, so the
+# simulation never needs to know which one is in use.
+
+
+@dataclass(frozen=True)
+class Segment:
+    """Where one skin strip goes: its centre on screen and its angle.
+
+    ``angle`` is in degrees, clockwise on screen (y points down), measured
+    from the strip's own +x axis, which runs from head to tail.
+    """
+
+    center: Vector2
+    angle: float
+
+
+class Canvas:
+    """Interface shared by the drawing back ends."""
+
+    size: tuple[int, int]
+
+    def set_scenery(self, background: pygame.Surface, shadow: pygame.Surface) -> None:
+        """Set the pond floor (drawn first) and rim shadow (drawn last)."""
+        raise NotImplementedError
+
+    def add_skin(self, skin: pygame.Surface, segments: int, brightness: int) -> object:
+        """Prepare ``skin`` for drawing in ``segments`` strips; returns a handle."""
+        raise NotImplementedError
+
+    def begin_frame(self) -> None:
+        """Start a frame by drawing the pond floor."""
+        raise NotImplementedError
+
+    def draw_body(self, skin: object, segments: list[Segment], alpha: int) -> None:
+        """Draw a fish: strip ``i`` of ``skin`` placed at ``segments[i]``."""
+        raise NotImplementedError
+
+    def draw_ripple(self, center: tuple[int, int], radius: float, alpha: int) -> None:
+        raise NotImplementedError
+
+    def end_frame(self) -> None:
+        """Draw the rim shadow and show the frame."""
+        raise NotImplementedError
+
+    def screenshot(self) -> pygame.Surface:
+        """A copy of the last frame, for tests and sharing."""
+        raise NotImplementedError
+
+
+def strip_rects(width: int, height: int, segments: int) -> list[pygame.Rect]:
+    """Source rectangles cutting a skin into ``segments`` vertical strips.
+
+    Strips overlap their neighbours by a pixel on each side so no seams
+    show once they are rotated.
+    """
+    spacing = width / segments
+    rects = []
+    for i in range(segments):
+        left = max(0, math.floor(i * spacing) - 1)
+        right = min(width, math.ceil((i + 1) * spacing) + 1)
+        rects.append(pygame.Rect(left, 0, right - left, height))
+    return rects
+
+
+def paint_ring(radius: int) -> pygame.Surface:
+    """A soft white ring, scaled and faded by the GPU to draw ripples."""
+    ring = pygame.Surface((2 * radius + 4, 2 * radius + 4), pygame.SRCALPHA)
+    c = radius + 2
+    pygame.gfxdraw.aacircle(ring, c, c, radius, (255, 255, 255, 255))
+    pygame.gfxdraw.aacircle(ring, c, c, radius - 1, (255, 255, 255, 128))
+    return ring
+
+
+RIPPLE_COLOR: Color = (200, 220, 240)
+
+
+@dataclass
+class _GpuSkin:
+    texture: object  # pygame._sdl2.video.Texture
+    rects: list[pygame.Rect]
+    brightness: int
+
+
+class GpuCanvas(Canvas):
+    """Draws with SDL2's hardware renderer (``pygame._sdl2.video``).
+
+    Rotation, depth tint and fade are applied by the GPU while copying each
+    strip, so a fish costs one tiny draw call per strip and textures never
+    need to be modified. Everything runs at the screen's full resolution.
+    """
+
+    RING_RADIUS = 64
+
+    def __init__(self, window_size: tuple[int, int] | None) -> None:
+        from pygame._sdl2 import video  # Imported here: optional in pygame.
+
+        self._video = video
+        if window_size is None:
+            self.window = video.Window("Koi Pond", fullscreen_desktop=True)
+        else:
+            self.window = video.Window("Koi Pond", size=window_size)
+        try:
+            self.renderer = video.Renderer(self.window, vsync=True)
+        except (TypeError, pygame.error):  # Older pygame or no vsync support.
+            self.renderer = video.Renderer(self.window)
+        self.size = tuple(self.window.size)
+        self._background = None
+        self._shadow = None
+        self._ring = video.Texture.from_surface(self.renderer, paint_ring(self.RING_RADIUS))
+
+    def set_scenery(self, background: pygame.Surface, shadow: pygame.Surface) -> None:
+        self._background = self._video.Texture.from_surface(self.renderer, background)
+        self._shadow = self._video.Texture.from_surface(self.renderer, shadow)
+
+    def add_skin(self, skin: pygame.Surface, segments: int, brightness: int) -> _GpuSkin:
+        texture = self._video.Texture.from_surface(self.renderer, skin)
+        rects = strip_rects(skin.get_width(), skin.get_height(), segments)
+        return _GpuSkin(texture, rects, brightness)
+
+    def begin_frame(self) -> None:
+        self.renderer.draw_color = (0, 0, 0, 255)
+        self.renderer.clear()
+        if self._background is not None:
+            self._background.draw()
+
+    def draw_body(self, skin: _GpuSkin, segments: list[Segment], alpha: int) -> None:
+        texture = skin.texture
+        texture.color = (skin.brightness, skin.brightness, skin.brightness)
+        texture.alpha = alpha
+        for rect, segment in zip(skin.rects, segments):
+            dest = pygame.Rect(0, 0, rect.width, rect.height)
+            dest.center = (round(segment.center.x), round(segment.center.y))
+            # SDL rotates clockwise around the destination centre.
+            texture.draw(srcrect=rect, dstrect=dest, angle=segment.angle)
+
+    def draw_ripple(self, center: tuple[int, int], radius: float, alpha: int) -> None:
+        size = round(2 * radius * (self.RING_RADIUS + 2) / self.RING_RADIUS)
+        dest = pygame.Rect(0, 0, size, size)
+        dest.center = center
+        self._ring.color = RIPPLE_COLOR
+        self._ring.alpha = alpha
+        self._ring.draw(dstrect=dest)
+
+    def end_frame(self) -> None:
+        if self._shadow is not None:
+            self._shadow.draw()
+        self.renderer.present()
+
+    def screenshot(self) -> pygame.Surface:
+        return self.renderer.to_surface()
+
+
+@dataclass
+class _SoftwareSkin:
+    strips: list[pygame.Surface]
+
+
+class SoftwareCanvas(Canvas):
+    """Draws on an ordinary pygame display surface with the CPU.
+
+    Rotating hundreds of strips per frame is the bottleneck here, so the
+    pond is drawn at ``render_scale`` of the screen and, where pygame's
+    SCALED mode is available, stretched to full screen by SDL.
+    """
+
+    def __init__(self, window_size: tuple[int, int] | None, render_scale: float) -> None:
+        self.screen = self._open(window_size, render_scale)
+        self.size = self.screen.get_size()
+        self._background: pygame.Surface | None = None
+        self._shadow: pygame.Surface | None = None
+
+    @staticmethod
+    def _open(window_size: tuple[int, int] | None, render_scale: float) -> pygame.Surface:
+        if window_size is not None:
+            return pygame.display.set_mode(window_size)
+        info = pygame.display.Info()
+        native = (info.current_w, info.current_h)
+        if render_scale < 1.0 and min(native) > 0 and hasattr(pygame, "SCALED"):
+            size = (round(native[0] * render_scale), round(native[1] * render_scale))
+            try:
+                return pygame.display.set_mode(size, pygame.FULLSCREEN | pygame.SCALED)
+            except pygame.error:
+                pass  # Fall back to drawing at the native resolution.
+        # (0, 0) with FULLSCREEN takes the native resolution (the whole phone).
+        return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+
+    def set_scenery(self, background: pygame.Surface, shadow: pygame.Surface) -> None:
+        self._background = background.convert()
+        self._shadow = shadow.convert_alpha()
+
+    def add_skin(self, skin: pygame.Surface, segments: int, brightness: int) -> _SoftwareSkin:
+        # Bake the depth tint into a private copy; the CPU has no colour mod.
+        tinted = skin.convert_alpha()
+        tinted.fill((brightness, brightness, brightness, 255), special_flags=pygame.BLEND_RGBA_MULT)
+        rects = strip_rects(tinted.get_width(), tinted.get_height(), segments)
+        return _SoftwareSkin([tinted.subsurface(r).copy() for r in rects])
+
+    def begin_frame(self) -> None:
+        if self._background is not None:
+            self.screen.blit(self._background, (0, 0))
+        else:
+            self.screen.fill((0, 0, 0))
+
+    def draw_body(self, skin: _SoftwareSkin, segments: list[Segment], alpha: int) -> None:
+        for strip, segment in zip(skin.strips, segments):
+            # pygame rotates counter-clockwise, hence the minus sign.
+            rotated = pygame.transform.rotate(strip, -segment.angle)
+            if alpha < 255:
+                rotated.set_alpha(alpha)
+            center = (round(segment.center.x), round(segment.center.y))
+            self.screen.blit(rotated, rotated.get_rect(center=center))
+
+    def draw_ripple(self, center: tuple[int, int], radius: float, alpha: int) -> None:
+        r = round(radius)
+        if r > 1:
+            x, y = center
+            pygame.gfxdraw.aacircle(self.screen, x, y, r, (*RIPPLE_COLOR, alpha))
+            pygame.gfxdraw.aacircle(self.screen, x, y, r + 1, (*RIPPLE_COLOR, alpha // 2))
+
+    def end_frame(self) -> None:
+        if self._shadow is not None:
+            self.screen.blit(self._shadow, (0, 0))
+        pygame.display.flip()
+
+    def screenshot(self) -> pygame.Surface:
+        return self.screen.copy()
+
+
+def open_canvas(config: PondConfig) -> Canvas:
+    """Open the window with the fastest back end this pygame supports."""
+    if config.renderer in ("auto", "gpu"):
+        try:
+            return GpuCanvas(config.window_size)
+        except (ImportError, AttributeError, pygame.error):
+            if config.renderer == "gpu":
+                raise
+    return SoftwareCanvas(config.window_size, config.render_scale)
+
+
 # ---------------------------------------------------------------------------
 # Fish
 # ---------------------------------------------------------------------------
@@ -497,34 +757,14 @@ class Flagellum:
     offsets from the fish's location; node 0 is the head.
     """
 
-    def __init__(self, skin: pygame.Surface, config: PondConfig = CONFIG) -> None:
+    def __init__(self, length: float, config: PondConfig = CONFIG) -> None:
         self.config = config
-        self.segments = config.body_segments
-        self.spacing = skin.get_width() / self.segments
+        self.spacing = length / config.body_segments
         self.muscle_phase = random.uniform(0.0, math.tau)
         self.muscle_rate = 0.0
         self.heading = random.uniform(0.0, math.tau)
         direction = Vector2(math.cos(self.heading), math.sin(self.heading))
-        self.nodes = [-direction * self.spacing * n for n in range(self.segments + 1)]
-        self.strips = self._cut_strips(skin)
-
-    def _cut_strips(self, skin: pygame.Surface) -> list[pygame.Surface]:
-        """Cut the skin into one vertical strip per segment.
-
-        Strips overlap their neighbours by a pixel on each side so no seams
-        show once they are rotated.
-        """
-        w, h = skin.get_size()
-        strips = []
-        for i in range(self.segments):
-            left = max(0, math.floor(i * self.spacing) - 1)
-            right = min(w, math.ceil((i + 1) * self.spacing) + 1)
-            strips.append(skin.subsurface(pygame.Rect(left, 0, right - left, h)).copy())
-        return strips
-
-    @property
-    def length(self) -> float:
-        return self.spacing * self.segments
+        self.nodes = [-direction * self.spacing * n for n in range(config.body_segments + 1)]
 
     def move(self) -> None:
         """Swing the neck and drag the spine behind it."""
@@ -542,17 +782,14 @@ class Flagellum:
             pull.scale_to_length(self.spacing)
             self.nodes[n] = self.nodes[n - 1] + pull
 
-    def draw(self, surface: pygame.Surface, origin: Vector2, alpha: int) -> None:
-        """Draw each skin strip rotated along its body segment."""
-        for i, strip in enumerate(self.strips):
-            a, b = self.nodes[i], self.nodes[i + 1]
-            # The strip's +x (towards the tail) must point from node i to i+1.
+    def segments(self, origin: Vector2) -> list[Segment]:
+        """Screen placement of every body segment, head first."""
+        placed = []
+        for a, b in zip(self.nodes, self.nodes[1:]):
+            # A strip's +x (towards the tail) points from node i to node i+1.
             angle = math.degrees(math.atan2(b.y - a.y, b.x - a.x))
-            rotated = pygame.transform.rotate(strip, -angle)
-            if alpha < 255:
-                rotated.set_alpha(alpha)
-            center = origin + (a + b) * 0.5
-            surface.blit(rotated, rotated.get_rect(center=(round(center.x), round(center.y))))
+            placed.append(Segment(origin + (a + b) * 0.5, angle))
+        return placed
 
 
 class Koi:
@@ -560,21 +797,19 @@ class Koi:
 
     def __init__(
         self,
-        skin: pygame.Surface,
+        skin: object,
+        skin_width: int,
         variety: str,
         position: Vector2,
-        brightness: int,
         scale: float,
         config: PondConfig = CONFIG,
     ) -> None:
         self.config = config
         self.scale = scale
         self.variety = variety
-        # Darken a private copy of the skin to place the fish at its depth.
-        skin = skin.copy()
-        skin.fill((brightness, brightness, brightness, 255), special_flags=pygame.BLEND_RGBA_MULT)
-        self.body = Flagellum(skin, config)
-        self.skin_width = skin.get_width()
+        self.skin = skin  # Handle from Canvas.add_skin.
+        self.skin_width = skin_width
+        self.body = Flagellum(skin_width, config)
 
         self.position = Vector2(position)
         self.velocity = Vector2()
@@ -660,8 +895,13 @@ class Koi:
         elif self.position.y > height + margin:
             self.position.y = 0
 
-    def draw(self, surface: pygame.Surface) -> None:
-        self.body.draw(surface, self.position, self.opacity)
+    def is_visible(self, width: int, height: int) -> bool:
+        """``False`` while the fish is entirely off screen (nothing to draw)."""
+        m = self.skin_width
+        return -m <= self.position.x <= width + m and -m <= self.position.y <= height + m
+
+    def draw(self, canvas: Canvas) -> None:
+        canvas.draw_body(self.skin, self.body.segments(self.position), self.opacity)
 
 
 # ---------------------------------------------------------------------------
@@ -708,42 +948,20 @@ class Ripple:
     center: tuple[int, int]
     born: int
 
-    def draw(self, surface: pygame.Surface, now: int, lifetime: int, max_radius: float) -> bool:
+    def draw(self, canvas: Canvas, now: int, lifetime: int, max_radius: float) -> bool:
         """Draw the ring; returns ``False`` once it has faded out."""
         age = (now - self.born) / lifetime
         if age >= 1.0:
             return False
-        radius = round(max_radius * age)
-        alpha = round(120 * (1.0 - age))
-        if radius > 1:
-            x, y = self.center
-            pygame.gfxdraw.aacircle(surface, x, y, radius, (200, 220, 240, alpha))
-            pygame.gfxdraw.aacircle(surface, x, y, radius + 1, (200, 220, 240, alpha // 2))
+        radius = max_radius * age
+        if radius > 1.0:
+            canvas.draw_ripple(self.center, radius, round(120 * (1.0 - age)))
         return True
 
 
 # ---------------------------------------------------------------------------
 # The pond
 # ---------------------------------------------------------------------------
-
-
-def open_window(render_scale: float) -> pygame.Surface:
-    """Open a full-screen window drawn at ``render_scale`` of the native size.
-
-    Below 1.0 the window uses pygame's SCALED mode, where the GPU stretches
-    the smaller drawing surface to the whole screen. Older pygame builds
-    without SCALED fall back to drawing at the native resolution.
-    """
-    info = pygame.display.Info()
-    native = (info.current_w, info.current_h)
-    if render_scale < 1.0 and min(native) > 0 and hasattr(pygame, "SCALED"):
-        size = (round(native[0] * render_scale), round(native[1] * render_scale))
-        try:
-            return pygame.display.set_mode(size, pygame.FULLSCREEN | pygame.SCALED)
-        except pygame.error:
-            pass  # No accelerated renderer: draw at full resolution instead.
-    # (0, 0) with FULLSCREEN takes the native resolution (the whole phone).
-    return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
 
 
 @dataclass
@@ -756,21 +974,22 @@ class Touch:
 
 
 class Pond:
-    """Owns the window, the scenery, the koi and the main loop."""
+    """Owns the canvas, the scenery, the koi and the main loop."""
 
     def __init__(self, config: PondConfig = CONFIG, seed: int | None = None) -> None:
         self.config = config
         self.rng = random.Random(seed)
         # Only video is needed; skipping audio avoids mixer issues on Android.
         pygame.display.init()
-        pygame.display.set_caption("Koi Pond")
-        self.screen = open_window(config.render_scale)
+        self.canvas = open_canvas(config)
         self.clock = pygame.time.Clock()
 
-        size = self.screen.get_size()
+        size = self.canvas.size
         self.scale = min(size) / config.reference_short_side
-        self.background = paint_pebble_bed(size, self.scale, self.rng).convert()
-        self.shadow = paint_inner_shadow(size, self.scale).convert_alpha()
+        self.canvas.set_scenery(
+            paint_pebble_bed(size, self.scale, self.rng),
+            paint_inner_shadow(size, self.scale),
+        )
         self.skins = SkinLibrary(Path(__file__).with_name(config.skins_folder), config)
 
         self.school: list[Koi] = []
@@ -786,11 +1005,12 @@ class Pond:
         count = len(self.school)
         low, high = cfg.depth_brightness
         brightness = round(low + (high - low) * count / max(1, cfg.max_koi - 1))
-        w, h = self.screen.get_size()
+        w, h = self.canvas.size
         margin = min(100 * self.scale, w / 4, h / 4)
         position = Vector2(self.rng.uniform(margin, w - margin), self.rng.uniform(margin, h - margin))
-        skin, variety = self.skins.make(self.scale, self.rng)
-        self.school.append(Koi(skin, variety, position, brightness, self.scale, cfg))
+        surface, variety = self.skins.make(self.scale, self.rng)
+        skin = self.canvas.add_skin(surface, cfg.body_segments, brightness)
+        self.school.append(Koi(skin, surface.get_width(), variety, position, self.scale, cfg))
 
     # -- frame --------------------------------------------------------------
 
@@ -819,10 +1039,13 @@ class Pond:
             self.add_koi()
             self.next_birth = now + cfg.birth_interval_ms
 
-        scare_radius = cfg.scare_radius * self.scale
-        w, h = self.screen.get_size()
+        scare_radius_sq = (cfg.scare_radius * self.scale) ** 2
+        w, h = self.canvas.size
         for koi in self.school:
-            near = self.touch.down and koi.position.distance_to(self.touch.position) <= scare_radius
+            near = (
+                self.touch.down
+                and koi.position.distance_squared_to(self.touch.position) <= scare_radius_sq
+            )
             if near:
                 koi.flee(self.touch.position, now)
             else:
@@ -837,16 +1060,17 @@ class Pond:
 
     def render(self, now: int) -> None:
         cfg = self.config
-        self.screen.blit(self.background, (0, 0))
+        canvas = self.canvas
+        w, h = canvas.size
+        canvas.begin_frame()
         for koi in self.school:
-            koi.draw(self.screen)
+            if koi.is_visible(w, h):
+                koi.draw(canvas)
+        max_radius = cfg.ripple_max_radius * self.scale
         self.ripples = [
-            r
-            for r in self.ripples
-            if r.draw(self.screen, now, cfg.ripple_lifetime_ms, cfg.ripple_max_radius * self.scale)
+            r for r in self.ripples if r.draw(canvas, now, cfg.ripple_lifetime_ms, max_radius)
         ]
-        self.screen.blit(self.shadow, (0, 0))
-        pygame.display.flip()
+        canvas.end_frame()
 
     def run(self, max_frames: int | None = None) -> None:
         """Run the main loop; ``max_frames`` is for automated testing."""
