@@ -8,7 +8,7 @@ It ports the behaviour of Ricardo Sánchez's Processing sketch "Koi Pond" (2009,
 
 - **Ten koi varieties:** Kohaku, Taisho Sanke, Showa, Tancho, Orenji Ogon, Ki Bekko, Aka Bekko, Asagi, Hariwake and Soragoi. Each fish's skin is painted when it is born, so every fish has its own markings.
 - **Swimming bodies:** the skin is cut into strips that follow a spine of nodes. A neck "muscle" sends a wave down to the tail, and it beats faster when the fish swims faster.
-- **Wandering and scattering:** fish wander slowly. Touching the water makes nearby fish bolt away, and their burst of speed wears off over about two seconds.
+- **Calm until touched:** koi glide slowly and turn gently. Touching the water stirs the whole pond: nearby fish bolt away and the rest swim faster. Over the next 15 seconds or so they calm down again (`stir_fade_s` in `PondConfig`).
 - **Water:** touching the pond makes ripples that behave like real water (see below).
 - **Depth:** a new koi arrives every half second, up to 60. Older fish swim deeper and look darker. New fish fade in.
 

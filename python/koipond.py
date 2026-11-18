@@ -120,13 +120,21 @@ class PondConfig:
     depth_brightness: tuple[int, int] = (40, 210)
     fade_in_per_frame: int = 2
 
-    # Wandering (values from the original sketch)
-    min_speed: float = 0.8
-    max_speed: float = 1.9
-    max_force: float = 0.2
+    # Swimming. Calm koi glide slowly and turn gently. Touching the water
+    # stirs the whole pond: every fish moves towards its "stirred" values,
+    # and the stir fades away again with time constant ``stir_fade_s``
+    # (mostly gone after about three times that). Speeds are reference
+    # pixels per frame; the stirred values are the original sketch's.
+    calm_speed: tuple[float, float] = (0.25, 0.6)
+    stirred_speed: tuple[float, float] = (0.8, 1.9)
+    calm_force: float = 0.04  # Steering strength: lower turns more gently.
+    stirred_force: float = 0.2
+    calm_wander_jitter: float = 0.015  # How quickly the wander target drifts.
+    stirred_wander_jitter: float = 0.05
+    speed_ease: float = 0.02  # Share of the gap to the target speed closed per frame.
+    stir_fade_s: float = 5.0
     wander_radius: float = 5.0
     wander_distance: float = 100.0
-    wander_jitter: float = 0.05
 
     # Fleeing from a touch
     scare_radius: float = 100.0
@@ -183,6 +191,11 @@ def limit(vector: Vector2, max_length: float) -> Vector2:
     if vector.length_squared() > max_length * max_length:
         vector.scale_to_length(max_length)
     return vector
+
+
+def lerp(a: float, b: float, t: float) -> float:
+    """Linear interpolation, ``t`` = 0 gives ``a``."""
+    return a + (b - a) * t
 
 
 def mix(a: Color, b: Color, t: float) -> Color:
@@ -885,7 +898,9 @@ class Koi:
         self.position = Vector2(position)
         self.velocity = Vector2()
         self.acceleration = Vector2()
-        self.max_force = config.max_force * scale
+        self.pace = random.random()  # Where this fish sits within the speed ranges.
+        self.stir = 0.0  # The pond's stir level, 0 calm to 1 stirred.
+        self.max_force = config.calm_force * scale
         self.max_speed = self._cruise_speed()
         self.rush_speed = random.uniform(*config.rush_speed) * scale
         self.wander_theta = random.uniform(0.0, math.tau)
@@ -896,7 +911,11 @@ class Koi:
         self.next_rush_tick = 0
 
     def _cruise_speed(self) -> float:
-        return random.uniform(self.config.min_speed, self.config.max_speed) * self.scale
+        """Swimming speed this fish settles at for the current stir level."""
+        cfg = self.config
+        calm = lerp(*cfg.calm_speed, self.pace)
+        stirred = lerp(*cfg.stirred_speed, self.pace)
+        return lerp(calm, stirred, self.stir) * self.scale
 
     # -- steering -----------------------------------------------------------
 
@@ -911,7 +930,8 @@ class Koi:
     def wander(self) -> None:
         """Seek a point that drifts around a circle ahead of the fish."""
         cfg = self.config
-        self.wander_theta += random.uniform(-cfg.wander_jitter, cfg.wander_jitter)
+        jitter = lerp(cfg.calm_wander_jitter, cfg.stirred_wander_jitter, self.stir)
+        self.wander_theta += random.uniform(-jitter, jitter)
         ahead = Vector2(math.cos(self.body.heading), math.sin(self.body.heading))
         circle = self.position + ahead * cfg.wander_distance * self.scale
         offset = Vector2(math.cos(self.wander_theta), math.sin(self.wander_theta))
@@ -919,13 +939,23 @@ class Koi:
 
     def flee(self, threat: Vector2, now: int) -> None:
         """Steer away from ``threat`` and start (or restart) a rush."""
+        self.max_force = self.config.stirred_force * self.scale
         self.acceleration -= self._steer(threat)
         self.rush_step = 0
         self.next_rush_tick = now
 
     # -- motion -------------------------------------------------------------
 
-    def update(self, now: int) -> None:
+    def update(self, now: int, stir: float) -> None:
+        """Move one frame; ``stir`` is the pond's stir level (0 calm, 1 stirred)."""
+        cfg = self.config
+        self.stir = stir
+        if self.rush_step is None:
+            # Ease towards the speed and agility that suit the stir level, so
+            # fish speed up and calm down gradually rather than at once.
+            self.max_speed += (self._cruise_speed() - self.max_speed) * cfg.speed_ease
+            self.max_force = lerp(cfg.calm_force, cfg.stirred_force, stir) * self.scale
+
         self.velocity += self.acceleration
         limit(self.velocity, self.max_speed)
         self.position += self.velocity
@@ -940,7 +970,11 @@ class Koi:
         self.opacity = min(255, self.opacity + self.config.fade_in_per_frame)
 
     def _update_rush(self, now: int) -> None:
-        """After a scare, swim fast and slow down step by step to cruising."""
+        """After a scare, swim fast and slow down step by step.
+
+        Once the rush is over, :meth:`update` eases the fish back to the
+        speed that suits the pond's stir level.
+        """
         cfg = self.config
         if self.rush_step is None or now < self.next_rush_tick:
             return
@@ -951,8 +985,6 @@ class Koi:
             self.rush_step += 1
         else:
             self.rush_step = None
-            self.max_speed = self._cruise_speed()
-            self.max_force = cfg.max_force * self.scale
 
     def wrap(self, width: int, height: int) -> None:
         """Reappear on the opposite side once fully off screen."""
@@ -1324,6 +1356,8 @@ class Pond:
 
         self.water = make_water(size, self.scale, config)
         self.touch = Touch()
+        self.stir = 0.0  # 0 calm to 1 stirred; set by touches, fades with time.
+        self.last_step_ms: int | None = None
 
         # Painting a skin takes longer than a frame on a phone, so every koi
         # is prepared now, behind an empty pond, and later births are free.
@@ -1379,6 +1413,7 @@ class Pond:
             self.school.append(self.unborn.pop(0))
             self.next_birth = now + cfg.birth_interval_ms
 
+        self._update_stir(now)
         scare_radius_sq = (cfg.scare_radius * self.scale) ** 2
         w, h = self.canvas.size
         for koi in self.school:
@@ -1390,10 +1425,19 @@ class Pond:
                 koi.flee(self.touch.position, now)
             else:
                 koi.wander()
-            koi.update(now)
+            koi.update(now, self.stir)
             koi.wrap(w, h)
 
         self.water.update(now, self.touch.position if self.touch.down else None)
+
+    def _update_stir(self, now: int) -> None:
+        """A touch stirs the pond fully; afterwards the stir fades exponentially."""
+        if self.touch.down:
+            self.stir = 1.0
+        elif self.last_step_ms is not None:
+            elapsed_s = (now - self.last_step_ms) / 1000.0
+            self.stir *= math.exp(-elapsed_s / self.config.stir_fade_s)
+        self.last_step_ms = now
 
     def render(self) -> None:
         canvas = self.canvas
