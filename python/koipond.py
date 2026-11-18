@@ -20,6 +20,11 @@ dark pebble bed until the pond holds ``max_koi`` fish.
   slowly wears off.
 * Depth: fish born earlier are drawn first and darker, so the pond looks
   deep. New fish fade in.
+* Water: touching the pond makes physically modelled ripples. The surface
+  follows the real dispersion relation of water waves (gravity and surface
+  tension), and is seen through optics: sunlight focused on the floor
+  (caustics), glints on tilted water, and fish refracted by the waves.
+  This needs numpy; without it simple rings are drawn instead.
 
 Speed
 -----
@@ -39,25 +44,36 @@ instead.
 
 Running on Android (Pydroid 3)
 ------------------------------
-1. Install pygame: Pydroid menu, Pip, search "pygame", Install.
+1. Install pygame and numpy: Pydroid menu, Pip, search each, Install.
 2. Open this file and press Run. It starts full screen.
 
 Controls
 --------
-* Touch and drag: scare the koi near your finger (and make ripples).
+* Touch and drag: scare the koi near your finger and stir the water.
 * Back button, Escape or closing the window: quit.
 """
 
 from __future__ import annotations
 
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Smooth (bilinear) stretching of GPU textures; used by the water overlay.
+# SDL only honours this if it is set before pygame creates the renderer,
+# which is why these imports come after it.
+os.environ.setdefault("SDL_RENDER_SCALE_QUALITY", "linear")
+
 import pygame
 import pygame.gfxdraw
 from pygame.math import Vector2
+
+try:
+    import numpy as np
+except ImportError:  # Optional: without numpy the water draws simple rings.
+    np = None
 
 Color = tuple[int, int, int]
 
@@ -119,8 +135,36 @@ class PondConfig:
     rush_steps: int = 10
     rush_step_ms: int = 200
 
-    # Ripples on touch
-    ripples: bool = True
+    # Water surface (needs numpy). Real physical constants; the screen's
+    # short side shows ``pond_short_side_m`` of real pond.
+    physical_water: bool = True
+    pond_short_side_m: float = 0.6
+    water_cells: int = 128  # Simulation cells across the short side.
+    water_margin: float = 0.15  # Extra grid beyond each screen edge.
+    water_steps_per_second: int = 60
+    water_max_steps_per_frame: int = 6
+    water_rest_slope: float = 0.002  # Below this the water counts as flat.
+    # Waves shorter than about 1 / water_resolved_fraction grid cells cannot be
+    # drawn smoothly; a soft low-pass keeps them out of the forcing and image.
+    water_resolved_fraction: float = 0.45
+    gravity: float = 9.81  # m/s^2
+    surface_tension_over_density: float = 7.28e-5  # m^3/s^2, water at 20 C.
+    kinematic_viscosity: float = 1.0e-6  # m^2/s, water at 20 C.
+    film_damping: float = 0.6  # 1/s, the organic film on real pond water.
+    finger_pressure_pa: float = 60.0
+    finger_radius_m: float = 0.005
+    refractive_index: float = 1.333
+    floor_depth_m: float = 0.35
+    fish_depth_m: tuple[float, float] = (0.30, 0.05)  # Oldest, newest fish.
+    light_direction: tuple[float, float] = (-0.6, -0.8)  # Sun at the top left.
+    caustic_strength: float = 1.6
+    glint_strength: float = 0.8
+    light_color: Color = (236, 246, 255)
+    shade_color: Color = (0, 10, 24)
+    light_max_alpha: float = 110.0  # Caps for the brightest and darkest
+    shade_max_alpha: float = 70.0  # spots, so the floor never washes out.
+
+    # Fallback rings, used when numpy is not installed
     ripple_interval_ms: int = 90
     ripple_lifetime_ms: int = 1400
     ripple_max_radius: float = 70.0
@@ -544,6 +588,11 @@ class Canvas:
     def draw_ripple(self, center: tuple[int, int], radius: float, alpha: int) -> None:
         raise NotImplementedError
 
+    def draw_overlay(self, image: pygame.Surface, size: tuple[float, float]) -> None:
+        """Draw a small RGBA ``image`` stretched smoothly over the top-left
+        ``size`` pixels of the screen (the water's light effects)."""
+        raise NotImplementedError
+
     def end_frame(self) -> None:
         """Draw the rim shadow and show the frame."""
         raise NotImplementedError
@@ -613,6 +662,7 @@ class GpuCanvas(Canvas):
         self._background = None
         self._shadow = None
         self._ring = video.Texture.from_surface(self.renderer, paint_ring(self.RING_RADIUS))
+        self._overlay = None
 
     def set_scenery(self, background: pygame.Surface, shadow: pygame.Surface) -> None:
         self._background = self._video.Texture.from_surface(self.renderer, background)
@@ -646,6 +696,15 @@ class GpuCanvas(Canvas):
         self._ring.color = RIPPLE_COLOR
         self._ring.alpha = alpha
         self._ring.draw(dstrect=dest)
+
+    def draw_overlay(self, image: pygame.Surface, size: tuple[float, float]) -> None:
+        overlay = self._overlay
+        if overlay is None or (overlay.width, overlay.height) != image.get_size():
+            overlay = self._video.Texture(self.renderer, image.get_size(), streaming=True)
+            overlay.blend_mode = 1  # SDL_BLENDMODE_BLEND
+            self._overlay = overlay
+        overlay.update(image)
+        overlay.draw(dstrect=pygame.Rect(0, 0, round(size[0]), round(size[1])))
 
     def end_frame(self) -> None:
         if self._shadow is not None:
@@ -722,6 +781,10 @@ class SoftwareCanvas(Canvas):
             x, y = center
             pygame.gfxdraw.aacircle(self.screen, x, y, r, (*RIPPLE_COLOR, alpha))
             pygame.gfxdraw.aacircle(self.screen, x, y, r + 1, (*RIPPLE_COLOR, alpha // 2))
+
+    def draw_overlay(self, image: pygame.Surface, size: tuple[float, float]) -> None:
+        scaled = pygame.transform.smoothscale(image, (round(size[0]), round(size[1])))
+        self.screen.blit(scaled, (0, 0))
 
     def end_frame(self) -> None:
         if self._shadow is not None:
@@ -801,12 +864,14 @@ class Koi:
         skin_width: int,
         variety: str,
         position: Vector2,
+        depth_m: float,
         scale: float,
         config: PondConfig = CONFIG,
     ) -> None:
         self.config = config
         self.scale = scale
         self.variety = variety
+        self.depth_m = depth_m  # Below the surface; sets how much it refracts.
         self.skin = skin  # Handle from Canvas.add_skin.
         self.skin_width = skin_width
         self.body = Flagellum(skin_width, config)
@@ -900,8 +965,9 @@ class Koi:
         m = self.skin_width
         return -m <= self.position.x <= width + m and -m <= self.position.y <= height + m
 
-    def draw(self, canvas: Canvas) -> None:
-        canvas.draw_body(self.skin, self.body.segments(self.position), self.opacity)
+    def draw(self, canvas: Canvas, water: Water) -> None:
+        segments = water.refract(self.body.segments(self.position), self.depth_m)
+        canvas.draw_body(self.skin, segments, self.opacity)
 
 
 # ---------------------------------------------------------------------------
@@ -941,22 +1007,281 @@ def paint_inner_shadow(size: tuple[int, int], scale: float) -> pygame.Surface:
     return shadow
 
 
-@dataclass
-class Ripple:
-    """An expanding ring on the water surface."""
+# ---------------------------------------------------------------------------
+# Water
+# ---------------------------------------------------------------------------
+#
+# Two implementations of the same small interface:
+#
+# * ``WaterSurface`` (needs numpy) simulates the real surface. The height
+#   field is kept in Fourier space, where linear water waves are independent
+#   damped oscillators, so every frame each mode is advanced exactly:
+#
+#       omega0(k)^2 = g k + (sigma / rho) k^3        deep-water dispersion
+#       beta(k)     = film + 2 nu k^2                 viscous + film damping
+#
+#   Surface tension makes short ripples outrun long ones, so a touch spreads
+#   into a train of rings instead of a single circle. The finger is a
+#   pressure patch on the surface; held still it presses a dimple, dragged it
+#   leaves a wake. The result is drawn through optics, not as rings:
+#
+#   - caustics: the curved surface focuses sunlight on the pond floor; the
+#     relative brightness change is -D (1 - 1/n) laplacian(h);
+#   - glints: tilted water reflects more or less sky, ~ slope . light;
+#   - refraction: a fish at depth d is seen shifted by -d (1 - 1/n) grad(h)
+#     (Snell's law for small slopes), so deeper fish wobble more.
+#
+# * ``RingRipples`` draws simple expanding rings. It is the fallback when
+#   numpy is not installed.
 
+
+def fft_friendly(n: int) -> int:
+    """Smallest size >= ``n`` with no prime factor above 5.
+
+    FFTs are fast for such sizes and can be many times slower when a size
+    has a large prime factor.
+    """
+    while True:
+        m = n
+        for prime in (2, 3, 5):
+            while m % prime == 0:
+                m //= prime
+        if m == 1:
+            return n
+        n += 1
+
+
+class Water:
+    """Interface shared by the water implementations."""
+
+    def update(self, now: int, finger: Vector2 | None) -> None:
+        """Advance to time ``now`` (ms); ``finger`` is the touch, if any."""
+        raise NotImplementedError
+
+    def refract(self, segments: list[Segment], depth_m: float) -> list[Segment]:
+        """Where ``segments`` at ``depth_m`` below the surface appear to be."""
+        return segments
+
+    def draw(self, canvas: Canvas) -> None:
+        """Draw the light effects of the surface on top of the pond."""
+        raise NotImplementedError
+
+
+@dataclass
+class _Ring:
     center: tuple[int, int]
     born: int
 
-    def draw(self, canvas: Canvas, now: int, lifetime: int, max_radius: float) -> bool:
-        """Draw the ring; returns ``False`` once it has faded out."""
-        age = (now - self.born) / lifetime
-        if age >= 1.0:
-            return False
-        radius = max_radius * age
-        if radius > 1.0:
-            canvas.draw_ripple(self.center, radius, round(120 * (1.0 - age)))
-        return True
+
+class RingRipples(Water):
+    """Fallback without numpy: rings spread from the finger and fade."""
+
+    def __init__(self, scale: float, config: PondConfig = CONFIG) -> None:
+        self.config = config
+        self.max_radius = config.ripple_max_radius * scale
+        self.rings: list[_Ring] = []
+        self.now = 0
+        self.last_ring = -config.ripple_interval_ms
+
+    def update(self, now: int, finger: Vector2 | None) -> None:
+        self.now = now
+        cfg = self.config
+        if finger is not None and now - self.last_ring >= cfg.ripple_interval_ms:
+            self.rings.append(_Ring((round(finger.x), round(finger.y)), now))
+            self.last_ring = now
+        self.rings = [r for r in self.rings if now - r.born < cfg.ripple_lifetime_ms]
+
+    def draw(self, canvas: Canvas) -> None:
+        for ring in self.rings:
+            age = (self.now - ring.born) / self.config.ripple_lifetime_ms
+            radius = self.max_radius * age
+            if radius > 1.0:
+                canvas.draw_ripple(ring.center, radius, round(120 * (1.0 - age)))
+
+
+class WaterSurface(Water):
+    """Physically based ripples: spectral linear water waves (needs numpy)."""
+
+    RHO = 1000.0  # Density of water, kg/m^3.
+
+    def __init__(self, screen_size: tuple[int, int], config: PondConfig = CONFIG) -> None:
+        self.config = config
+        w_px, h_px = screen_size
+        self.px_per_m = min(screen_size) / config.pond_short_side_m
+        self.cell_m = config.pond_short_side_m / config.water_cells
+        self.cell_px = self.cell_m * self.px_per_m
+
+        # The visible screen plus a margin, so that waves leaving the screen
+        # have faded before the periodic grid brings them back in.
+        self.visible = (math.ceil(w_px / self.cell_px), math.ceil(h_px / self.cell_px))
+        self.pad = math.ceil(max(self.visible) * config.water_margin)
+        nx = fft_friendly(self.visible[0] + 2 * self.pad)
+        ny = fft_friendly(self.visible[1] + 2 * self.pad)
+        self.shape = (ny, nx)
+
+        kx = 2.0 * np.pi * np.fft.rfftfreq(nx, d=self.cell_m)
+        ky = 2.0 * np.pi * np.fft.fftfreq(ny, d=self.cell_m)
+        self.kx, self.ky = np.meshgrid(kx, ky)
+        k = np.hypot(self.kx, self.ky)
+        self.k = k
+        self.k2 = k * k
+
+        omega0_sq = config.gravity * k + config.surface_tension_over_density * k**3
+        beta = config.film_damping + 2.0 * config.kinematic_viscosity * k**2
+        self.omega = np.sqrt(np.maximum(omega0_sq - beta**2, 1e-12))
+        # Soft low-pass: 1 for well-resolved waves, ~0 near the grid limit.
+        k_cut = config.water_resolved_fraction * np.pi / self.cell_m
+        self.resolved = np.exp(-((k / k_cut) ** 4))
+        self.beta = beta
+        self.dt = 1.0 / config.water_steps_per_second
+        self._build_propagator(self.dt)
+
+        self.h_hat = np.zeros_like(k, dtype=np.complex128)  # Height, m.
+        self.v_hat = np.zeros_like(k, dtype=np.complex128)  # Vertical speed, m/s.
+        self.active = False
+        self.clock_ms: float | None = None
+        self._grad: tuple[np.ndarray, np.ndarray] | None = None  # Visible area only.
+        self._overlay: pygame.Surface | None = None
+
+    def _build_propagator(self, dt: float) -> None:
+        """Exact one-step update of every mode (damped harmonic oscillator).
+
+        With h'' + 2 beta h' + omega0^2 h = 0 and omega the damped frequency:
+            h1 = e [(cos + beta sin / omega) h0 + (sin / omega) v0]
+            v1 = e [(cos - beta sin / omega) v0 - (omega + beta^2 / omega) sin h0]
+        where e = exp(-beta dt) and cos, sin are of omega dt.
+        """
+        e = np.exp(-self.beta * dt)
+        c = np.cos(self.omega * dt)
+        s = np.sin(self.omega * dt)
+        w, b = self.omega, self.beta
+        self.p_hh = e * (c + b * s / w)
+        self.p_hv = e * (s / w)
+        self.p_vh = -e * (w + b * b / w) * s
+        self.p_vv = e * (c - b * s / w)
+        for p in (self.p_hh, self.p_hv, self.p_vh, self.p_vv):
+            p[0, 0] = 0.0  # The mean water level never changes.
+
+    # -- physics ------------------------------------------------------------
+
+    def _pressure_hat(self, finger: Vector2) -> np.ndarray:
+        """Fourier transform of a Gaussian finger pressure patch at ``finger``.
+
+        Computed analytically, which avoids an FFT and grid aliasing:
+        FT{P exp(-r^2 / 2 s^2)} = P 2 pi s^2 exp(-k^2 s^2 / 2), shifted to the
+        finger by a phase factor, and divided by the cell area for numpy's
+        unnormalised discrete transform.
+        """
+        cfg = self.config
+        s = cfg.finger_radius_m
+        x = (finger.x / self.cell_px + self.pad) * self.cell_m
+        y = (finger.y / self.cell_px + self.pad) * self.cell_m
+        amplitude = cfg.finger_pressure_pa * 2.0 * np.pi * s * s / self.cell_m**2
+        envelope = amplitude * np.exp(-0.5 * self.k2 * s * s) * self.resolved
+        return envelope * np.exp(-1j * (self.kx * x + self.ky * y))
+
+    def update(self, now: int, finger: Vector2 | None) -> None:
+        if self.clock_ms is None:
+            self.clock_ms = float(now)
+        if finger is None and not self.active:
+            self.clock_ms = float(now)  # Calm water: nothing to simulate.
+            self._grad = None
+            return
+
+        # Fixed physics steps keep the propagator exact whatever the frame rate.
+        step_ms = self.dt * 1000.0
+        steps = int((now - self.clock_ms) / step_ms)
+        steps = min(steps, self.config.water_max_steps_per_frame)
+        self.clock_ms = max(self.clock_ms + steps * step_ms, now - step_ms)
+
+        # Pressure p on the surface accelerates mode k by -(k / rho) p.
+        force = None
+        if finger is not None:
+            force = -(self.k / self.RHO) * self._pressure_hat(finger) * self.dt
+        for _ in range(steps):
+            if force is not None:
+                self.v_hat += force
+            self.h_hat, self.v_hat = (
+                self.p_hh * self.h_hat + self.p_hv * self.v_hat,
+                self.p_vh * self.h_hat + self.p_vv * self.v_hat,
+            )
+
+        if steps:
+            self.active = True
+            slope = self._render_fields()
+            if finger is None and slope < self.config.water_rest_slope:
+                # Flat to the eye: stop simulating until the next touch.
+                self.h_hat[:] = 0.0
+                self.v_hat[:] = 0.0
+                self.active = False
+                self._grad = None
+                self._overlay = None
+
+    def _render_fields(self) -> float:
+        """Compute the surface slope and light overlay; returns the max slope.
+
+        One inverse FFT gives the height field; slope and curvature over the
+        visible area then come from central differences, which is far
+        cheaper than a transform per derivative.
+        """
+        cfg = self.config
+        h = np.fft.irfft2(self.h_hat * self.resolved, s=self.shape)
+        p, (vx, vy) = self.pad, self.visible
+        hv = h[p - 1 : p + vy + 1, p - 1 : p + vx + 1]  # Visible area plus a border.
+        centre = hv[1:-1, 1:-1]
+        left, right = hv[1:-1, :-2], hv[1:-1, 2:]
+        up, down = hv[:-2, 1:-1], hv[2:, 1:-1]
+        two_dx = 2.0 * self.cell_m
+        gx = (right - left) / two_dx
+        gy = (down - up) / two_dx
+        lap = (left + right + up + down - 4.0 * centre) / self.cell_m**2
+        self._grad = (gx, gy)
+
+        optics = 1.0 - 1.0 / cfg.refractive_index
+        caustic = -cfg.floor_depth_m * optics * lap
+        lx, ly = cfg.light_direction
+        glint = gx * lx + gy * ly
+        light = (caustic * cfg.caustic_strength + glint * cfg.glint_strength) * 255.0
+
+        rgba = np.empty((vy, vx, 4), dtype=np.uint8)
+        bright = light > 0.0
+        rgba[..., :3] = np.where(bright[..., None], cfg.light_color, cfg.shade_color)
+        alpha = np.where(
+            bright,
+            np.minimum(light, cfg.light_max_alpha),
+            np.minimum(-light, cfg.shade_max_alpha),
+        )
+        rgba[..., 3] = alpha.astype(np.uint8)
+        self._overlay = pygame.image.frombuffer(rgba.tobytes(), (vx, vy), "RGBA")
+        return float(max(np.abs(gx).max(), np.abs(gy).max()))
+
+    # -- optics -------------------------------------------------------------
+
+    def refract(self, segments: list[Segment], depth_m: float) -> list[Segment]:
+        if self._grad is None or not segments:
+            return segments
+        gx, gy = self._grad
+        ny, nx = gx.shape
+        shift_px = depth_m * (1.0 - 1.0 / self.config.refractive_index) * self.px_per_m
+        moved = []
+        for seg in segments:
+            i = min(ny - 1, max(0, int(seg.center.y / self.cell_px)))
+            j = min(nx - 1, max(0, int(seg.center.x / self.cell_px)))
+            offset = Vector2(float(gx[i, j]), float(gy[i, j])) * shift_px
+            moved.append(Segment(seg.center - offset, seg.angle))
+        return moved
+
+    def draw(self, canvas: Canvas) -> None:
+        if self._overlay is not None:
+            vx, vy = self.visible
+            canvas.draw_overlay(self._overlay, (vx * self.cell_px, vy * self.cell_px))
+
+
+def make_water(screen_size: tuple[int, int], scale: float, config: PondConfig) -> Water:
+    """The physical water surface when numpy is installed, rings otherwise."""
+    if np is not None and config.physical_water:
+        return WaterSurface(screen_size, config)
+    return RingRipples(scale, config)
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +1295,6 @@ class Touch:
 
     down: bool = False
     position: Vector2 = field(default_factory=Vector2)
-    last_ripple: int = 0
 
 
 class Pond:
@@ -993,24 +1317,28 @@ class Pond:
         self.skins = SkinLibrary(Path(__file__).with_name(config.skins_folder), config)
 
         self.school: list[Koi] = []
-        self.ripples: list[Ripple] = []
+        self.water = make_water(size, self.scale, config)
         self.touch = Touch()
         self.next_birth = 0
 
     # -- population ---------------------------------------------------------
 
     def add_koi(self) -> None:
-        """Add one koi; later fish swim higher, so they are drawn brighter."""
+        """Add one koi; later fish swim higher, so they are brighter."""
         cfg = self.config
-        count = len(self.school)
+        rank = len(self.school) / max(1, cfg.max_koi - 1)  # 0 deepest, 1 highest.
         low, high = cfg.depth_brightness
-        brightness = round(low + (high - low) * count / max(1, cfg.max_koi - 1))
+        brightness = round(low + (high - low) * rank)
+        deep, shallow = cfg.fish_depth_m
+        depth_m = deep + (shallow - deep) * rank
         w, h = self.canvas.size
         margin = min(100 * self.scale, w / 4, h / 4)
         position = Vector2(self.rng.uniform(margin, w - margin), self.rng.uniform(margin, h - margin))
         surface, variety = self.skins.make(self.scale, self.rng)
         skin = self.canvas.add_skin(surface, cfg.body_segments, brightness)
-        self.school.append(Koi(skin, surface.get_width(), variety, position, self.scale, cfg))
+        self.school.append(
+            Koi(skin, surface.get_width(), variety, position, depth_m, self.scale, cfg)
+        )
 
     # -- frame --------------------------------------------------------------
 
@@ -1026,7 +1354,6 @@ class Pond:
             if event.type == pygame.MOUSEBUTTONDOWN:
                 self.touch.down = True
                 self.touch.position = Vector2(event.pos)
-                self.touch.last_ripple = 0
             elif event.type == pygame.MOUSEMOTION and self.touch.down:
                 self.touch.position = Vector2(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP:
@@ -1053,23 +1380,16 @@ class Pond:
             koi.update(now)
             koi.wrap(w, h)
 
-        if cfg.ripples and self.touch.down and now - self.touch.last_ripple >= cfg.ripple_interval_ms:
-            pos = (round(self.touch.position.x), round(self.touch.position.y))
-            self.ripples.append(Ripple(pos, now))
-            self.touch.last_ripple = now
+        self.water.update(now, self.touch.position if self.touch.down else None)
 
-    def render(self, now: int) -> None:
-        cfg = self.config
+    def render(self) -> None:
         canvas = self.canvas
         w, h = canvas.size
         canvas.begin_frame()
         for koi in self.school:
             if koi.is_visible(w, h):
-                koi.draw(canvas)
-        max_radius = cfg.ripple_max_radius * self.scale
-        self.ripples = [
-            r for r in self.ripples if r.draw(canvas, now, cfg.ripple_lifetime_ms, max_radius)
-        ]
+                koi.draw(canvas, self.water)
+        self.water.draw(canvas)
         canvas.end_frame()
 
     def run(self, max_frames: int | None = None) -> None:
@@ -1079,7 +1399,7 @@ class Pond:
             while self.handle_events():
                 now = pygame.time.get_ticks()
                 self.step(now)
-                self.render(now)
+                self.render()
                 self.clock.tick(self.config.fps)
                 frame += 1
                 if max_frames is not None and frame >= max_frames:
