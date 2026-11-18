@@ -530,7 +530,9 @@ class SkinLibrary:
         size = scale * rng.uniform(self.config.min_skin_scale, self.config.max_skin_scale)
         if self.custom:
             name, image = rng.choice(self.custom)
-            source = image.convert_alpha()
+            # convert_alpha() needs a classic display surface, which the GPU
+            # renderer does not create; loaded PNGs work without it too.
+            source = image.convert_alpha() if pygame.display.get_surface() else image
             dims = (max(8, round(source.get_width() * size)), max(4, round(source.get_height() * size)))
             return pygame.transform.smoothscale(source, dims), name
         w, h = self.config.skin_size
@@ -568,6 +570,9 @@ class Canvas:
     """Interface shared by the drawing back ends."""
 
     size: tuple[int, int]
+    #: True when presenting a frame already waits for the display's refresh,
+    #: so the main loop must not add its own frame-rate limit on top.
+    vsync: bool = False
 
     def set_scenery(self, background: pygame.Surface, shadow: pygame.Surface) -> None:
         """Set the pond floor (drawn first) and rim shadow (drawn last)."""
@@ -656,6 +661,7 @@ class GpuCanvas(Canvas):
             self.window = video.Window("Koi Pond", size=window_size)
         try:
             self.renderer = video.Renderer(self.window, vsync=True)
+            self.vsync = True
         except (TypeError, pygame.error):  # Older pygame or no vsync support.
             self.renderer = video.Renderer(self.window)
         self.size = tuple(self.window.size)
@@ -1316,17 +1322,26 @@ class Pond:
         )
         self.skins = SkinLibrary(Path(__file__).with_name(config.skins_folder), config)
 
-        self.school: list[Koi] = []
         self.water = make_water(size, self.scale, config)
         self.touch = Touch()
+
+        # Painting a skin takes longer than a frame on a phone, so every koi
+        # is prepared now, behind an empty pond, and later births are free.
+        self.canvas.begin_frame()
+        self.canvas.end_frame()
+        self.unborn: list[Koi] = [self._prepare_koi(n) for n in range(config.max_koi)]
+        self.school: list[Koi] = []
         self.next_birth = 0
 
     # -- population ---------------------------------------------------------
 
-    def add_koi(self) -> None:
-        """Add one koi; later fish swim higher, so they are brighter."""
+    def _prepare_koi(self, birth_order: int) -> Koi:
+        """Create the koi born as number ``birth_order``, skin ready to draw.
+
+        Later fish swim higher, so they are brighter and refract less.
+        """
         cfg = self.config
-        rank = len(self.school) / max(1, cfg.max_koi - 1)  # 0 deepest, 1 highest.
+        rank = birth_order / max(1, cfg.max_koi - 1)  # 0 deepest, 1 highest.
         low, high = cfg.depth_brightness
         brightness = round(low + (high - low) * rank)
         deep, shallow = cfg.fish_depth_m
@@ -1336,9 +1351,7 @@ class Pond:
         position = Vector2(self.rng.uniform(margin, w - margin), self.rng.uniform(margin, h - margin))
         surface, variety = self.skins.make(self.scale, self.rng)
         skin = self.canvas.add_skin(surface, cfg.body_segments, brightness)
-        self.school.append(
-            Koi(skin, surface.get_width(), variety, position, depth_m, self.scale, cfg)
-        )
+        return Koi(skin, surface.get_width(), variety, position, depth_m, self.scale, cfg)
 
     # -- frame --------------------------------------------------------------
 
@@ -1362,8 +1375,8 @@ class Pond:
 
     def step(self, now: int) -> None:
         cfg = self.config
-        if now >= self.next_birth and len(self.school) < cfg.max_koi:
-            self.add_koi()
+        if self.unborn and now >= self.next_birth:
+            self.school.append(self.unborn.pop(0))
             self.next_birth = now + cfg.birth_interval_ms
 
         scare_radius_sq = (cfg.scare_radius * self.scale) ** 2
@@ -1400,7 +1413,9 @@ class Pond:
                 now = pygame.time.get_ticks()
                 self.step(now)
                 self.render()
-                self.clock.tick(self.config.fps)
+                # With vsync the display already paces the loop; a second
+                # limit on top of it would now and then skip a refresh.
+                self.clock.tick(0 if self.canvas.vsync else self.config.fps)
                 frame += 1
                 if max_frames is not None and frame >= max_frames:
                     break
