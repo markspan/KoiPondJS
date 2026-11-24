@@ -36,6 +36,16 @@ jobs:
       - name: Build APK
         run: ./gradlew --no-daemon assembleRelease
 
+      - name: Rendering tests
+        run: ./gradlew --no-daemon testReleaseUnitTest
+
+      - name: Keep the rendered previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: render-previews
+          path: android/app/build/render-previews
+
       - name: Keep the APK as a build artifact
         uses: actions/upload-artifact@v4
         with:

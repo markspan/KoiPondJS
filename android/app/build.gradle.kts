@@ -34,6 +34,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -42,4 +46,10 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+dependencies {
+    // Rendering tests run Android's real Skia graphics on the JVM.
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }
