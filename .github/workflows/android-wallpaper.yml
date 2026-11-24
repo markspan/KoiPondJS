@@ -46,6 +46,20 @@ jobs:
           name: render-previews
           path: android/app/build/render-previews
 
+      # Also as a release, so the images can be fetched from github.com.
+      - name: Publish the rendered previews
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -d app/build/render-previews ]; then
+            gh release delete render-previews --yes --cleanup-tag || true
+            gh release create render-previews app/build/render-previews/*.png \
+              --prerelease --target "$GITHUB_SHA" \
+              --title "Rendering test previews" \
+              --notes "Images from the rendering tests at ${GITHUB_SHA::7}."
+          fi
+
       - name: Keep the APK as a build artifact
         uses: actions/upload-artifact@v4
         with:

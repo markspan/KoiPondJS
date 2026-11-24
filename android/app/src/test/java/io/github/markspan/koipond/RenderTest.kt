@@ -30,14 +30,15 @@ class RenderTest {
     @Test
     fun everyVarietyHasASolidBody() {
         val rng = Random(1)
-        val failures = VARIETIES.filter { variety ->
+        // Body alpha at points well inside the body, from behind the head to near the tail.
+        val probes = listOf(50, 80, 110, 140)
+        val report = VARIETIES.associate { variety ->
             val skin = SkinPainter(220, 80).paint(variety, rng)
             save(skin, "skin-" + variety.name.replace(' ', '_'))
-            // Points well inside the body, from behind the head to near the tail.
-            val solid = listOf(50, 80, 110, 140).all { x -> Color.alpha(skin.getPixel(x, 40)) == 255 }
-            !solid
-        }.map { it.name }
-        assertTrue("Bodies not solid: $failures", failures.isEmpty())
+            variety.name to probes.map { x -> Color.alpha(skin.getPixel(x, 40)) }
+        }
+        val failures = report.filterValues { alphas -> alphas.any { it != 255 } }
+        assertTrue("Bodies not solid (alpha at x = $probes): $failures", failures.isEmpty())
     }
 
     @Test
