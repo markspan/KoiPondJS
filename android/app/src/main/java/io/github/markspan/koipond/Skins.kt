@@ -91,7 +91,9 @@ class SkinPainter(private val w: Int, private val h: Int) {
         val widest = BODY_HALF_WIDTH * h
         if (t < 0.25f) return widest * sqrt(max(0f, 1f - ((0.25f - t) / 0.25f).pow(2))) // Rounded head.
         val narrow = PEDUNCLE_HALF_WIDTH * h
-        val taper = cos((t - 0.25f) / 0.75f * PI.toFloat() / 2f).pow(1.2f)
+        // In float, cos(pi / 2) is -4e-8, and a negative number to the power
+        // 1.2 is NaN; one NaN point makes Android discard the whole outline.
+        val taper = cos((t - 0.25f) / 0.75f * PI.toFloat() / 2f).coerceAtLeast(0f).pow(1.2f)
         return narrow + (widest - narrow) * taper
     }
 

@@ -42,6 +42,24 @@ class RenderTest {
     }
 
     @Test
+    fun bodiesAreSolidAtEverySkinSize() {
+        // Rounding problems depend on the skin size, which varies per fish.
+        val rng = Random(2)
+        val failures = mutableListOf<String>()
+        for (width in 100..528 step 7) {
+            val height = width * 80 / 220
+            for (variety in VARIETIES) {
+                val skin = SkinPainter(width, height).paint(variety, rng)
+                val solid = listOf(0.25f, 0.4f, 0.55f, 0.7f).all { fx ->
+                    Color.alpha(skin.getPixel((width * fx).toInt(), height / 2)) == 255
+                }
+                if (!solid) failures += "${variety.name} at ${width}x$height"
+            }
+        }
+        assertTrue("Bodies not solid: $failures", failures.isEmpty())
+    }
+
+    @Test
     fun pondFrameRenders() {
         val frame = Bitmap.createBitmap(1080, 2400, Bitmap.Config.ARGB_8888)
         val pond = Pond(1080, 2400)
