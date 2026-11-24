@@ -1,0 +1,55 @@
+# Builds the koi pond live wallpaper (android/) and publishes the APK as
+# the "wallpaper-latest" pre-release, so the newest build is always one
+# direct download link that can be opened on the phone.
+name: Android wallpaper
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-wallpaper.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write # Needed to publish the release.
+
+concurrency:
+  group: android-wallpaper
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Keep the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koi-pond-wallpaper
+          path: android/app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish as the latest download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk KoiPond.apk
+          gh release delete wallpaper-latest --yes --cleanup-tag || true
+          gh release create wallpaper-latest KoiPond.apk \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Koi Pond wallpaper (latest build)" \
+            --notes "Built from ${GITHUB_REF_NAME} at ${GITHUB_SHA::7}. Download KoiPond.apk on your phone, install it, then open the Koi Pond app and choose Set wallpaper."

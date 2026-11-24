@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-35">
+        <!-- Pectoral fins -->
+        <path
+            android:fillColor="#D9E6EE"
+            android:pathData="M44,49 Q40,38 48,36 Q50,44 50,49 Z M44,59 Q40,70 48,72 Q50,64 50,59 Z" />
+        <!-- Tail -->
+        <path
+            android:fillColor="#D9E6EE"
+            android:pathData="M72,54 L82,45 L79,54 L82,63 Z" />
+        <!-- Body -->
+        <path
+            android:fillColor="#F4F2EC"
+            android:pathData="M30,54 Q30,46 40,46 Q60,46 73,52 L73,56 Q60,62 40,62 Q30,62 30,54 Z" />
+        <!-- Red patches (Kohaku) -->
+        <path
+            android:fillColor="#CC2620"
+            android:pathData="M37,50 Q41,47 45,50 Q47,54 44,57 Q39,58 37,55 Z M52,49 Q58,48 62,51 Q62,56 57,58 Q52,58 51,54 Z" />
+        <!-- Eyes -->
+        <path
+            android:fillColor="#0C0C10"
+            android:pathData="M33,51 m-1,0 a1,1 0,1 0,2 0 a1,1 0,1 0,-2 0 M33,57 m-1,0 a1,1 0,1 0,2 0 a1,1 0,1 0,-2 0" />
+    </group>
+</vector>
